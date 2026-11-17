@@ -93,7 +93,20 @@ namespace PhoneAudioTray
                 }
                 return cache;
             }
-            finally { try { if (File.Exists(partial)) File.Delete(partial); } catch { } }
+            finally { DeletePartial(partial); }
+        }
+
+        private static void DeletePartial(string partial)
+        {
+            // A remote file can become a directory between stat and pull. Clean only our own
+            // generated partial target, including directories, never a caller-supplied path.
+            if (!string.Equals(Path.GetDirectoryName(Path.GetFullPath(partial)), CacheRoot, StringComparison.OrdinalIgnoreCase)
+                || !partial.EndsWith(".part", StringComparison.Ordinal)) return;
+            try {
+                if (Directory.Exists(partial)) Directory.Delete(partial, true);
+                else if (File.Exists(partial)) File.Delete(partial);
+            }
+            catch { }
         }
 
         internal static void KeepForExternalApp(string path)
@@ -114,6 +127,7 @@ namespace PhoneAudioTray
                     if (ExternalFiles.Contains(path)) continue;
                     try { File.Delete(path); } catch { }
                 }
+                try { foreach (var partial in Directory.GetDirectories(CacheRoot, "*.part")) DeletePartial(partial); } catch { }
                 try { Directory.Delete(CacheRoot, false); } catch { }
             }
         }

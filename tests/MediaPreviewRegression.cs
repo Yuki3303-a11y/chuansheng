@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -31,6 +31,11 @@ namespace PhoneAudioTray
                 if (mode == "delay") Thread.Sleep(400);
                 var target = args[args.Length - 1];
                 Directory.CreateDirectory(Path.GetDirectoryName(target));
+                if (mode == "directory") {
+                    Directory.CreateDirectory(target);
+                    File.WriteAllText(Path.Combine(target, "synthetic-child.txt"), "unexpected directory payload");
+                    return 0;
+                }
                 File.WriteAllText(target, "ABCDEF");
                 File.WriteAllText(Path.Combine(root, "pulled"), "1");
                 return 0;
@@ -63,6 +68,15 @@ namespace PhoneAudioTray
                 bool rejected = false;
                 try { MediaPreview.Download("fake", entry, CancellationToken.None); } catch (IOException) { rejected = true; }
                 Check(rejected && !File.Exists(expected), "changed source never published");
+                Environment.SetEnvironmentVariable("TRANSMIT_PREVIEW_TEST_MODE", "directory");
+                rejected = false;
+                try { MediaPreview.Download("fake", entry, CancellationToken.None); } catch (IOException) { rejected = true; }
+                Check(rejected && Directory.GetDirectories(Path.GetDirectoryName(expected), "*.part").Length == 0, "file replaced by directory leaves no partial directory");
+                var abandoned = expected + "." + Guid.NewGuid().ToString("N") + ".part";
+                Directory.CreateDirectory(abandoned);
+                File.WriteAllText(Path.Combine(abandoned, "synthetic-child.txt"), "cleanup fixture");
+                MediaPreview.Cleanup();
+                Check(!Directory.Exists(abandoned), "cleanup removes abandoned partial directories");
                 Environment.SetEnvironmentVariable("TRANSMIT_PREVIEW_TEST_MODE", "delay");
                 File.Delete(Path.Combine(root, "started"));
                 var pending = Task.Run(() => {

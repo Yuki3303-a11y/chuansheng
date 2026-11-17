@@ -496,7 +496,7 @@ namespace PhoneAudioTray
             if (btnPreview == null) return;
             // Count first: Ctrl+A must not allocate/scan a list on every selection event.
             var entry = list.SelectedIndices.Count == 1 ? EntryAt(list.SelectedIndices[0]) : null;
-            btnPreview.Enabled = entry != null && !entry.IsDir && MediaPreview.CanPreview(entry.FullPath);
+            btnPreview.Enabled = entry != null && !entry.IsDir && !entry.IsLink && !entry.IsUnavailable && MediaPreview.CanPreview(entry.FullPath);
         }
 
         // ---------- 搜索 ----------
@@ -544,7 +544,7 @@ namespace PhoneAudioTray
         private void PreviewSelected()
         {
             var selected = SelectedEntries();
-            if (selected.Count != 1 || selected[0].IsDir || !MediaPreview.CanPreview(selected[0].FullPath)) return;
+            if (selected.Count != 1 || selected[0].IsDir || selected[0].IsLink || selected[0].IsUnavailable || !MediaPreview.CanPreview(selected[0].FullPath)) return;
             using (var dialog = new MediaPreviewDialog(serial, selected[0])) dialog.ShowDialog(this);
         }
 

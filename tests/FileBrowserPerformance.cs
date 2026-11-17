@@ -197,17 +197,19 @@ namespace PhoneAudioTray
             // The full Android shell command must arrive as one Windows argument.
             if (args.Length != 4 || args[1] != "synthetic" || args[2] != "shell") return 2;
             var command = args[3];
+            // Fixtures use canonical names; production must pass directory operands with /.
+            command = command.Replace("/'", "'");
             if (command.StartsWith("find "))
             {
                 if (command.Contains("'/partial'"))
                 {
-                    Console.WriteLine("/partial/video.mp4");
+                    Console.Write("/partial/video.mp4\0");
                     Console.Error.WriteLine("find: /partial/private: Permission denied");
                     return 1;
                 }
                 if (command.Contains("'/empty'")) return 0;
                 Thread.Sleep(1500);
-                Console.WriteLine("/fake-search-result");
+                Console.Write("/fake-search-result\0");
                 return 0;
             }
             if (command.Contains("'/slow'")) Thread.Sleep(5000);

@@ -16,6 +16,8 @@ namespace PhoneAudioTray
     {
         public string Name;
         public bool IsDir;
+        public bool IsLink;
+        public bool IsUnavailable;
         public long Size;
         public string Modified;
         public string FullPath;
@@ -24,7 +26,9 @@ namespace PhoneAudioTray
         {
             get
             {
+                if (IsUnavailable) return "无法读取";
                 if (IsDir) return "文件夹";
+                if (IsLink) return "符号链接";
                 var name = Name ?? "";
                 var dot = name.LastIndexOf('.');
                 if (dot <= 0 || dot == name.Length - 1) return "文件";
@@ -59,7 +63,7 @@ namespace PhoneAudioTray
         {
             get
             {
-                if (IsDir) return "";
+                if (IsDir || IsUnavailable) return "";
                 if (Size >= 1024L * 1024 * 1024) return (Size / 1024.0 / 1024 / 1024).ToString("0.0") + " GB";
                 if (Size >= 1024 * 1024) return (Size / 1024.0 / 1024).ToString("0.0") + " MB";
                 if (Size >= 1024) return (Size / 1024.0).ToString("0") + " KB";
@@ -157,6 +161,8 @@ namespace PhoneAudioTray
         {
             cancellation.ThrowIfCancellationRequested();
             ValidateRemotePath(entry.FullPath);
+            if (entry.IsUnavailable) throw new IOException("手机未授予此项目的读取权限，取回未完成：" + entry.Name);
+            if (entry.IsLink) throw new IOException("不自动取回符号链接，请进入实际目录后选择文件：" + entry.Name);
             var name = entry.FullPath.Substring(entry.FullPath.LastIndexOf('/') + 1);
             if (name.Length == 0 || name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || name.EndsWith(" ") || name.EndsWith("."))
                 throw new IOException("该手机文件名不适用于 Windows，未取回：" + name);
@@ -204,7 +210,10 @@ namespace PhoneAudioTray
         public static List<RemoteEntry> ListRemote(string serial, string path, CancellationToken cancellation = default(CancellationToken), bool includeHidden = false)
         {
             var result = new List<RemoteEntry>();
-            var listing = RunFileCommand("-s " + Arg(serial) + " shell " + Arg((includeHidden ? "ls -lan -- " : "ls -ln -- ") + ShellQ(path)), 60000, cancellation);
+            // A trailing slash enters command-line directory links such as /sdcard.
+            // Do not follow every child link (-L), which could recurse outside the directory.
+            var directory = DirectoryPath(path);
+            var listing = RunFileCommand("-s " + Arg(serial) + " shell " + Arg((includeHidden ? "ls -lanb -- " : "ls -lnb -- ") + ShellQ(directory)), 60000, cancellation);
 
             using (var reader = new StringReader(listing))
             {
@@ -216,10 +225,23 @@ namespace PhoneAudioTray
                 if (line.Length == 0 || line.StartsWith("total ")) continue;
 
                 var m = ListingLine.Match(line);
-                if (!m.Success) continue;
+                if (!m.Success)
+                {
+                    var denied = System.Text.RegularExpressions.Regex.Match(line, @"^([-dlbcps])\?{9}\s+\?\s+\?\s+\?\s+\?\s+\? (.+)$");
+                    if (!denied.Success) throw new IOException("无法安全解析手机目录，已停止操作，避免遗漏或误认文件。");
+                    var deniedName = denied.Groups[2].Value;
+                    bool deniedLink = denied.Groups[1].Value == "l";
+                    if (deniedLink && deniedName.Contains(" -> ")) deniedName = deniedName.Substring(0, deniedName.IndexOf(" -> ", StringComparison.Ordinal));
+                    deniedName = DecodeListedName(deniedName);
+                    result.Add(new RemoteEntry { Name = deniedName, FullPath = path.TrimEnd('/') + "/" + deniedName,
+                        IsDir = denied.Groups[1].Value == "d", IsLink = deniedLink, IsUnavailable = true });
+                    continue;
+                }
 
                 var name = m.Groups[6].Value;
+                // -b escapes spaces inside names, so this unescaped separator belongs only to ls.
                 if (m.Groups[1].Value == "l" && name.Contains(" -> ")) name = name.Substring(0, name.IndexOf(" -> ", StringComparison.Ordinal));
+                name = DecodeListedName(name);
                 if (name == "." || name == "..") continue;
 
                 long size;
@@ -229,6 +251,7 @@ namespace PhoneAudioTray
                 {
                     Name = name,
                     IsDir = m.Groups[1].Value == "d",
+                    IsLink = m.Groups[1].Value == "l",
                     Size = size,
                     Modified = m.Groups[4].Value + " " + m.Groups[5].Value,
                     FullPath = path.TrimEnd('/') + "/" + name
@@ -238,6 +261,46 @@ namespace PhoneAudioTray
 
             // The browser sorts once in the background according to its active column.
             return result;
+        }
+
+        private static string DecodeListedName(string value)
+        {
+            var bytes = new List<byte>();
+            for (int i = 0; i < value.Length; i++)
+            {
+                if (value[i] != '\\')
+                {
+                    int start = i;
+                    while (i + 1 < value.Length && value[i + 1] != '\\') i++;
+                    bytes.AddRange(Encoding.UTF8.GetBytes(value.Substring(start, i - start + 1)));
+                    continue;
+                }
+                if (++i >= value.Length) throw new IOException("手机文件名转义不完整，已停止操作。");
+                char c = value[i];
+                int escape = "abefnrtv".IndexOf(c);
+                if (escape >= 0) bytes.Add(new byte[] { 7, 8, 27, 12, 10, 13, 9, 11 }[escape]);
+                else if (c == '\\' || c == ' ') bytes.Add((byte)c);
+                else if (c >= '0' && c <= '7' && i + 2 < value.Length
+                    && value[i + 1] >= '0' && value[i + 1] <= '7' && value[i + 2] >= '0' && value[i + 2] <= '7')
+                {
+                    int code = (c - '0') * 64 + (value[i + 1] - '0') * 8 + value[i + 2] - '0';
+                    if (code == 0 || code > 255) throw new IOException("手机文件名转义无效，已停止操作。");
+                    bytes.Add((byte)code);
+                    i += 2;
+                }
+                else throw new IOException("不支持的手机文件名转义，已停止操作。");
+            }
+            try { return new UTF8Encoding(false, true).GetString(bytes.ToArray()); }
+            catch (DecoderFallbackException) { throw new IOException("手机文件名不是有效 UTF-8，已停止操作。"); }
+        }
+
+        private static string DirectoryPath(string path)
+        {
+            if (string.IsNullOrEmpty(path) || !path.StartsWith("/", StringComparison.Ordinal)
+                || path.IndexOfAny(new[] { '\r', '\n', '\0' }) >= 0
+                || path.Split('/').Any(p => p == "." || p == ".."))
+                throw new IOException("无效的手机目录路径。");
+            return path.TrimEnd('/') + "/";
         }
 
         /// <summary>只列子目录（给树用）</summary>
@@ -386,8 +449,9 @@ namespace PhoneAudioTray
             {
                 foreach (var type in new[] { "d", "f" })
                 {
-                    var command = "find " + ShellQ(root) + " -maxdepth 4 -type " + type + " -iname " + ShellQ(pattern);
+                    var command = "find " + ShellQ(DirectoryPath(root)) + " -maxdepth 4 -type " + type + " -iname " + ShellQ(pattern) + " -print0";
                     string output;
+                    bool partial = false;
                     try { output = RunFileCommand("-s " + Arg(serial) + " shell " + Arg(command), 60000, cancellation); }
                     catch (IOException ex)
                     {
@@ -395,17 +459,31 @@ namespace PhoneAudioTray
                         if (!error.Contains("permission denied") && !error.Contains("operation not permitted")) throw;
                         // find emits usable matches before exiting nonzero for inaccessible subdirectories.
                         output = ex.Message;
+                        partial = true;
                         warning = "部分目录无权访问，搜索结果可能不完整";
                     }
-                    using (var reader = new StringReader(output))
+                    int start = 0;
+                    while (start < output.Length)
                     {
-                        string path;
-                        while ((path = reader.ReadLine()) != null)
+                        cancellation.ThrowIfCancellationRequested();
+                        int end = output.IndexOf('\0', start);
+                        if (end < 0)
                         {
-                            cancellation.ThrowIfCancellationRequested();
-                            if (!path.StartsWith("/", StringComparison.Ordinal)) continue;
-                            results.Add(new RemoteEntry { Name = path, FullPath = path, IsDir = type == "d", Modified = "" });
+                            if (partial) break; // stderr follows the last complete, NUL-terminated match.
+                            throw new IOException("手机搜索未返回安全的文件名分隔符，已停止显示结果。");
                         }
+                        var path = output.Substring(start, end - start).TrimEnd('/');
+                        start = end + 1;
+                        if (!path.StartsWith("/", StringComparison.Ordinal)) continue;
+                        // Windows ADB shell can rewrite LF inside a name to CRLF even with -T.
+                        // These names are already unsupported by file mutations; never invent a path by normalizing them.
+                        if (path.IndexOfAny(new[] { '\r', '\n' }) >= 0)
+                        {
+                            const string skipped = "含换行控制字符的名称不支持操作，已从搜索结果跳过";
+                            if (!warning.Contains(skipped)) warning = warning.Length == 0 ? skipped : warning + "；" + skipped;
+                            continue;
+                        }
+                        results.Add(new RemoteEntry { Name = path, FullPath = path, IsDir = type == "d", Modified = "" });
                     }
                 }
                 return results;

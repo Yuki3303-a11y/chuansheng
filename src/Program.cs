@@ -1,4 +1,4 @@
-// PhoneAudioTray.cs — 传声 → 电脑耳机（托盘程序）
+﻿// PhoneAudioTray.cs — 传声 → 电脑耳机（托盘程序）
 // 编译：csc /target:winexe /codepage:65001 /out:PhoneAudioTray.exe PhoneAudioTray.cs
 using System;
 using System.Collections.Generic;
@@ -27,7 +27,7 @@ namespace PhoneAudioTray
 
     internal static class Program
     {
-        public const string AppVersion = "1.1.4";
+        public const string AppVersion = "1.1.5";
 
         public static string BaseDir = AppDomain.CurrentDomain.BaseDirectory;
         /// <summary>外部 scrcpy 目录（settings.txt 里的 scrcpyDir，或同级的 Scrcpy 文件夹）</summary>
@@ -777,16 +777,7 @@ namespace PhoneAudioTray
             ShowVideo = want;
             if (VideoItem != null) VideoItem.Checked = want;
 
-            var serial = LastSerial;
-            var mode = LastMode;
-            bool had;
-            lock (Sessions) had = Sessions.Count > 0;
-
-            if (had && !string.IsNullOrEmpty(serial))
-            {
-                StopAllSessions(false);
-                StartSession(serial, mode ?? "手动", false);
-            }
+            RestartForModeChange();
             SyncMicSession();
             UpdateStatus();
             Toast.Show(want ? "画面已开启" : "画面已关闭", want ? "音视频同步输出中" : "已切换为仅音频");
@@ -1061,13 +1052,13 @@ namespace PhoneAudioTray
             return devices.Contains(addr);
         }
 
-        public static void StartSession(string serial, string mode, bool notifyConnect = true)
+        public static bool StartSession(string serial, string mode, bool notifyConnect = true, bool showErrors = true)
         {
             if (!File.Exists(ScrcpyExe))
             {
-                MessageBox.Show("找不到 scrcpy.exe：\r\n" + ScrcpyExe, "错误",
+                if (showErrors) MessageBox.Show("找不到 scrcpy.exe：\r\n" + ScrcpyExe, "错误",
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
-                return;
+                return false;
             }
 
             Session already;
@@ -1078,9 +1069,9 @@ namespace PhoneAudioTray
             }
             if (already != null)
             {
-                MessageBox.Show("这个设备已经在转发了：" + serial, "提示",
+                if (showErrors) MessageBox.Show("这个设备已经在转发了：" + serial, "提示",
                     MessageBoxButtons.OK, MessageBoxIcon.Information);
-                return;
+                return true;
             }
 
             if (!AllowMultiple && hadSessions) StopAllSessions(false);
@@ -1178,7 +1169,10 @@ namespace PhoneAudioTray
                 if (ShowVideo && ShareMic) StartMicSession(serial);
 
                 UpdateStatus();
-                if (notifyConnect) Toast.Show("传声 · 已连接", mode + " · " + serial);
+                bool active;
+                lock (Sessions) active = Sessions.Contains(session);
+                if (active && notifyConnect) Toast.Show("传声 · 已启动连接", mode + " · " + serial);
+                return active;
             }
             catch (Exception ex)
             {
@@ -1187,8 +1181,9 @@ namespace PhoneAudioTray
                     try { if (!p.HasExited) { p.Kill(); p.WaitForExit(5000); } } catch { }
                     p.Dispose();
                 }
-                MessageBox.Show("启动 scrcpy 失败：\r\n" + ex.Message, "错误",
+                if (showErrors) MessageBox.Show("启动 scrcpy 失败：\r\n" + ex.Message, "错误",
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return false;
             }
         }
 
@@ -1218,16 +1213,14 @@ namespace PhoneAudioTray
         /// <summary>模式类开关（画面/剪贴板）改动后，重启当前这一路使其生效。</summary>
         public static void RestartForModeChange()
         {
-            var serial = LastSerial;
-            var mode = LastMode;
-            bool had;
-            lock (Sessions) had = Sessions.Count > 0;
-
-            if (had && !string.IsNullOrEmpty(serial))
-            {
-                StopAllSessions();
-                StartSession(serial, mode ?? "手动");
-            }
+            List<Session> previous;
+            lock (Sessions) previous = Sessions.ToList();
+            if (previous.Count == 0) return;
+            StopAllSessions(false);
+            foreach (var session in previous.Where(s => !s.IsMic))
+                StartSession(session.Serial, session.Mode ?? "手动", false);
+            if (NeedMicSession())
+                foreach (var serial in previous.Where(s => s.IsMic).Select(s => s.Serial).Distinct()) StartMicSession(serial);
             UpdateStatus();
         }
 
@@ -1354,9 +1347,13 @@ namespace PhoneAudioTray
         public static void StopLatest()
         {
             Session last;
-            lock (Sessions) last = Sessions.LastOrDefault();
+            List<Session> related;
+            lock (Sessions) {
+                last = Sessions.LastOrDefault(s => !s.IsMic) ?? Sessions.LastOrDefault();
+                related = last == null ? new List<Session>() : Sessions.Where(s => s.Serial == last.Serial).ToList();
+            }
             if (last == null) return;
-            Kill(last);
+            foreach (var session in related) Kill(session);
             Toast.Show("已停止", "音频共享已停止");
         }
 
@@ -1394,7 +1391,7 @@ namespace PhoneAudioTray
         private static void HandleSessionExit(string serial, string mode, bool wasVideo, bool byUs)
         {
             if (!wasVideo || byUs) return;                 // 主动停止 / 本来就是纯音频
-            lock (Sessions) if (Sessions.Count > 0) return; // 还有别的路在跑，不动
+            lock (Sessions) if (Sessions.Any(s => !s.IsMic)) return; // 麦克风伴随进程不阻止主连接退回音频。
 
             bool online;
             try { online = ListDevices().Contains(serial); }
@@ -1472,7 +1469,7 @@ namespace PhoneAudioTray
                 lock (Sessions)
                 {
                     if (Sessions.Count == 0) return null;
-                    return Sessions[Sessions.Count - 1].Serial;
+                    return (Sessions.LastOrDefault(s => !s.IsMic) ?? Sessions[Sessions.Count - 1]).Serial;
                 }
             }
         }
@@ -1499,86 +1496,67 @@ namespace PhoneAudioTray
         }
 
         // ----- 手机音量（真正的主音量）-----
+        internal static bool TryGetPhoneVolume(string serial, out int maximum, out int current)
+        {
+            maximum = current = -1;
+            if (string.IsNullOrEmpty(serial)) return false;
+            var output = RunAdb("-s " + Transfer.Arg(serial) + " shell cmd media_session volume --stream 3 --get");
+            if (output.StartsWith("ERROR:", StringComparison.Ordinal)) return false;
+            var range = Regex.Match(output, @"range \[0\.\.(\d+)\]");
+            var volume = Regex.Match(output, @"volume is (\d+)");
+            return range.Success && volume.Success && int.TryParse(range.Groups[1].Value, out maximum) && maximum > 0
+                && int.TryParse(volume.Groups[1].Value, out current) && current >= 0 && current <= maximum;
+        }
+
         public static int GetPhoneMaxVolume(string serial)
         {
-            if (string.IsNullOrEmpty(serial)) return 15;
-            var output = RunAdb("-s " + serial + " shell cmd media_session volume --stream 3 --get");
-            var m = Regex.Match(output, @"range \[0\.\.(\d+)\]");
-            if (m.Success)
-            {
-                int max;
-                if (int.TryParse(m.Groups[1].Value, out max) && max > 0) return max;
-            }
-            return 15;
+            int maximum, current;
+            return TryGetPhoneVolume(serial, out maximum, out current) ? maximum : -1;
         }
 
         public static int GetPhoneVolume(string serial)
         {
-            if (string.IsNullOrEmpty(serial)) return -1;
-            var output = RunAdb("-s " + serial + " shell cmd media_session volume --stream 3 --get");
-            var m = Regex.Match(output, @"volume is (\d+)");
-            if (m.Success)
-            {
-                int v;
-                if (int.TryParse(m.Groups[1].Value, out v)) return v;
-            }
-            return -1;
+            int maximum, current;
+            return TryGetPhoneVolume(serial, out maximum, out current) ? current : -1;
         }
 
         public static bool SetPhoneVolumePct(int pct)
         {
+            if (pct < 0 || pct > 100) return false;
             var serial = PrimarySerial;
-            if (string.IsNullOrEmpty(serial))
-            {
-                MessageBox.Show("还没有连接手机。先连接再调手机音量。", "手机音量",
-                    MessageBoxButtons.OK, MessageBoxIcon.Information);
-                return false;
-            }
-
-            int max = GetPhoneMaxVolume(serial);
-            int cur = GetPhoneVolume(serial);
-            if (cur < 0) cur = 0;
-
-            int target = (int)Math.Round((max * pct) / 100.0);
-            if (target < 0) target = 0;
-            if (target > max) target = max;
-
-            int delta = target - cur;
+            int maximum, current;
+            if (!TryGetPhoneVolume(serial, out maximum, out current)) { PhoneVolumePct = -1; return false; }
+            int target = (int)Math.Round(maximum * (pct / 100.0));
+            int delta = target - current;
             if (delta != 0)
             {
-                // vivo 等机型会拦截 cmd media_session --set（只打日志不生效），
-                // 但按键事件一定生效，所以用 KEYCODE_VOLUME_UP/DOWN 一步步推。
-                string key = delta > 0 ? "24" : "25";
                 var codes = new StringBuilder();
+                string key = delta > 0 ? "24" : "25";
                 for (int i = 0; i < Math.Abs(delta); i++) codes.Append(key).Append(' ');
-                RunAdb("-s " + serial + " shell input keyevent " + codes.ToString().Trim(), 15000);
+                try { Transfer.RunFileCommand("-s " + Transfer.Arg(serial) + " shell input keyevent " + codes.ToString().Trim(), 15000); }
+                catch { PhoneVolumePct = -1; return false; }
                 Thread.Sleep(250);
             }
-
-            int actual = GetPhoneVolume(serial);
-            if (actual >= 0 && max > 0)
-                PhoneVolumePct = (int)Math.Round(actual * 100.0 / max);
-            else
-                PhoneVolumePct = pct;
-            return true;
+            int actualMaximum, actual;
+            if (!TryGetPhoneVolume(serial, out actualMaximum, out actual)) { PhoneVolumePct = -1; return false; }
+            PhoneVolumePct = (int)Math.Round(actual * 100.0 / actualMaximum);
+            return actualMaximum == maximum && actual == target;
         }
 
         public static void ShowVolumeDialog()
         {
             var serial = PrimarySerial;
-            if (PhoneVolumePct < 0 && !string.IsNullOrEmpty(serial))
-            {
-                int max = GetPhoneMaxVolume(serial);
-                int cur = GetPhoneVolume(serial);
-                if (cur >= 0 && max > 0) PhoneVolumePct = (int)Math.Round(cur * 100.0 / max);
-            }
+            int maximum, current;
+            PhoneVolumePct = TryGetPhoneVolume(serial, out maximum, out current)
+                ? (int)Math.Round(current * 100.0 / maximum) : -1;
 
-            using (var dlg = new VolumeDialog(PcVolume, PhoneVolumePct < 0 ? 50 : PhoneVolumePct, serial != null))
+            using (var dlg = new VolumeDialog(PcVolume, PhoneVolumePct < 0 ? 50 : PhoneVolumePct, PhoneVolumePct >= 0))
             {
                 if (dlg.ShowDialog() != DialogResult.OK) return;
 
                 SetPcVolume(dlg.PcValue);
-                if (dlg.PhoneValue >= 0) SetPhoneVolumePct(dlg.PhoneValue);
+                if (dlg.PhoneValue >= 0 && !SetPhoneVolumePct(dlg.PhoneValue))
+                    MessageBox.Show("手机音量未修改完成，请确认连接、读取权限或手机音量限制。", "手机音量", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
         }
     }

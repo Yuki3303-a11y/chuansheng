@@ -16,6 +16,18 @@ namespace PhoneAudioTray
                 if ((bool)payloadCheck.Invoke(null, new object[] { temporary })) throw new Exception("Empty runtime file accepted");
                 System.IO.File.WriteAllText(temporary, "synthetic runtime");
                 if (!(bool)payloadCheck.Invoke(null, new object[] { temporary })) throw new Exception("Nonempty runtime file rejected");
+                using (var source = new System.IO.MemoryStream(new byte[] { 1, 2, 3, 4 })) Payload.ExtractResource(source, temporary);
+                if (System.IO.File.ReadAllBytes(temporary).Length != 4) throw new Exception("Partial resource was not repaired");
+                try { using (var source = new BrokenResource()) Payload.ExtractResource(source, temporary); throw new Exception("Broken extraction reported success"); }
+                catch (System.IO.IOException) { }
+                if (System.IO.File.ReadAllBytes(temporary).Length != 4) throw new Exception("Failed extraction replaced the valid resource");
+                var concurrent = temporary + ".concurrent";
+                try {
+                    System.Threading.Tasks.Parallel.For(0, 16, i => {
+                        using (var source = new System.IO.MemoryStream(new byte[] { 1, 2, 3, 4 })) Payload.ExtractResource(source, concurrent);
+                    });
+                    if (System.IO.File.ReadAllBytes(concurrent).Length != 4) throw new Exception("Concurrent extraction published partial content");
+                } finally { System.IO.File.Delete(concurrent); }
             } finally { System.IO.File.Delete(temporary); }
             Console.WriteLine("PASS runtime completeness rejects zero-byte files");
             const string path = @"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -55,6 +67,18 @@ namespace PhoneAudioTray
             }
             finally { Program.Tray.Dispose(); }
             return 0;
+        }
+
+        private sealed class BrokenResource : System.IO.MemoryStream
+        {
+            private bool read;
+            public override int Read(byte[] buffer, int offset, int count)
+            {
+                if (read) throw new System.IO.IOException("Synthetic interrupted extraction");
+                read = true;
+                buffer[offset] = 9;
+                return 1;
+            }
         }
     }
 }

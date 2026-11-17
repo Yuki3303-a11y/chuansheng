@@ -63,6 +63,8 @@ namespace PhoneAudioTray
                 Check(procs[0].Cpu == 7.5, "CPU-selected toybox header parsed");
                 ProcessTreeDialog.ApplyCpu(procs, "[PID] %CPU NAME\n11 99 com.tencent.mm:push\n[PID] %CPU NAME\n11 6.5 com.tencent.mm:push");
                 Check(procs[0].Cpu == 6.5, "PID-selected toybox header parsed");
+                var namedHeaders = ProcessTreeDialog.ParsePs("PID PPID USER NAME RSS\n55 1 root PID USER 123\n56 1 root later_process 456");
+                Check(namedHeaders.Count == 2 && namedHeaders[0].Name == "PID USER" && namedHeaders[1].Pid == 56, "process names cannot replace the ps header");
                 if (args.Length == 2) {
                     Program.BaseDir = args[0];
                     var read = typeof(ProcessTreeDialog).GetMethod("ReadSnapshot", BindingFlags.NonPublic | BindingFlags.Instance);

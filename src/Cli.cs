@@ -388,8 +388,8 @@ namespace PhoneAudioTray
                         {
                             var usb = Program.ListDevices().Where(d => !d.Contains(":")).ToList();
                             if (usb.Count == 0) return "ERR 没有 USB 设备（检查数据线和「允许 USB 调试」）";
-                            Program.StartSession(usb[0], "USB");
-                            return "OK 已连接 " + usb[0];
+                            return Program.StartSession(usb[0], "USB", true, false)
+                                ? "OK 已启动连接 " + usb[0] : "ERR scrcpy 启动失败，请检查程序文件与调试日志";
                         }
 
                     case "pair":
@@ -411,7 +411,9 @@ namespace PhoneAudioTray
                             }
                             if (target == null) return "OK 配对成功，但暂时没发现连接地址，请在手机上保持无线调试页面再试 WiFi 连接";
                             string detail;
-                            if (Program.TryConnect(target, out detail)) { Program.StartSession(target, "WiFi"); return "OK 配对并已连接 " + target; }
+                            if (Program.TryConnect(target, out detail))
+                                return Program.StartSession(target, "WiFi", true, false)
+                                    ? "OK 配对成功，已启动连接 " + target : "ERR 配对成功，但 scrcpy 启动失败，请检查调试日志";
                             return "OK 已配对，但连接失败：" + detail.Trim();
                         }
 
@@ -421,8 +423,8 @@ namespace PhoneAudioTray
                             string detail;
                             if (Program.TryConnect(arg, out detail))
                             {
-                                Program.StartSession(arg, "WiFi");
-                                return "OK 已连接 " + arg;
+                                return Program.StartSession(arg, "WiFi", true, false)
+                                    ? "OK 已启动连接 " + arg : "ERR ADB 已连接，但 scrcpy 启动失败，请检查调试日志";
                             }
                             return "ERR 连接失败：" + detail.Trim();
                         }
@@ -500,16 +502,17 @@ namespace PhoneAudioTray
                     case "volume-phone":
                         {
                             int v;
-                            if (!int.TryParse(arg, out v)) return "ERR 音量要 0-100 的数字";
-                            Program.SetPhoneVolumePct(v);
-                            return "OK 手机音量 → " + v + "%";
+                            if (!int.TryParse(arg, out v) || v < 0 || v > 100) return "ERR 音量要 0-100 的数字";
+                            return Program.SetPhoneVolumePct(v)
+                                ? "OK 手机音量 → " + Program.PhoneVolumePct + "%"
+                                : "ERR 手机音量未修改完成，请确认设备连接、音量读取权限及手机音量限制";
                         }
 
                     case "volume-pc":
                         {
                             int v;
-                            if (!int.TryParse(arg, out v)) return "ERR 音量要 0-100 的数字";
-                            Program.SetPcVolume(Math.Max(0, Math.Min(100, v)) / 100f);
+                            if (!int.TryParse(arg, out v) || v < 0 || v > 100) return "ERR 音量要 0-100 的数字";
+                            Program.SetPcVolume(v / 100f);
                             return "OK 电脑侧音量 → " + v + "%";
                         }
 
@@ -562,9 +565,10 @@ namespace PhoneAudioTray
         {
             if (string.IsNullOrEmpty(arg)) return !current;           // 省略 = toggle
             var a = arg.ToLowerInvariant();
+            if (a == "toggle" || a == "切换") return !current;
             if (a == "on" || a == "1" || a == "true" || a == "开") return true;
             if (a == "off" || a == "0" || a == "false" || a == "关") return false;
-            return !current;
+            throw new ArgumentException("开关参数应为 on、off 或 toggle");
         }
     }
 }

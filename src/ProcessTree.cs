@@ -184,7 +184,7 @@ namespace PhoneAudioTray
             foreach (var raw in (output ?? "").Split('\n')) {
                 var parts = Regex.Split(raw.Trim(), @"\s+");
                 if (parts.Length < 4) continue;
-                if (parts.Contains("PID") && parts.Contains("USER")) { header = parts; continue; }
+                if ((parts[0] == "PID" || parts[0] == "USER") && parts.Contains("PID") && parts.Contains("USER")) { header = parts; continue; }
                 if (header == null) continue;
                 int pidIndex = Array.IndexOf(header, "PID"), userIndex = Array.IndexOf(header, "USER");
                 int parentIndex = Array.IndexOf(header, "PPID"), rssIndex = Array.IndexOf(header, "RSS");

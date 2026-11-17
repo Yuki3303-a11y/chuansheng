@@ -20,6 +20,28 @@ namespace PhoneAudioTray
         public static int Main(string[] args)
         {
             if (args.Length > 0) {
+                if (Path.GetFileName(Assembly.GetExecutingAssembly().Location) == "scrcpy.exe") {
+                    if (Environment.GetEnvironmentVariable("PAT_RUNTIME_SCRCPY_DELAY") == "1") Thread.Sleep(5000);
+                    return 0;
+                }
+                if (args[0] == "devices") { Console.WriteLine("List of devices attached\nsynthetic\tdevice"); return 0; }
+                if (args[0] == "-s") {
+                    var state = Environment.GetEnvironmentVariable("PAT_RUNTIME_STATE");
+                    var mode = Environment.GetEnvironmentVariable("PAT_RUNTIME_VOLUME_MODE");
+                    if (args.Contains("volume")) {
+                        if (mode == "unreadable") { Console.Error.WriteLine("synthetic denied"); return 1; }
+                        Console.WriteLine("volume is " + (File.Exists(state) ? File.ReadAllText(state) : "3") + " range [0..15]");
+                    }
+                    if (args.Contains("keyevent")) {
+                        File.WriteAllText(state + ".called", "called");
+                        if (mode == "success") {
+                            int current = File.Exists(state) ? int.Parse(File.ReadAllText(state)) : 3;
+                            foreach (var key in args.SkipWhile(x => x != "keyevent").Skip(1)) current += key == "24" ? 1 : -1;
+                            File.WriteAllText(state, current.ToString());
+                        }
+                    }
+                    return 0;
+                }
                 if (args[0] == "sleep") { Thread.Sleep(1500); return 0; }
                 if (args[0] == "flood") { Console.Error.Write(new string('e', 200000)); Console.Write("payload"); return 0; }
                 if (args[0] == "fail") { Console.Write("partial"); Console.Error.Write("synthetic failure"); return 3; }
@@ -110,6 +132,63 @@ namespace PhoneAudioTray
                     File.WriteAllText(Path.Combine(temp, "devices.txt"), "synthetic|phone|alias\n");
                     typeof(Program).GetField("cacheLoaded", BindingFlags.Static | BindingFlags.NonPublic).SetValue(null, false);
                     Check(Program.QueryDeviceName("synthetic") == "phone|alias", "device alias preserves pipe");
+                    var pc = Program.PcVolume;
+                    var notifications = Toast.Enabled;
+                    Toast.Enabled = false;
+                    Check(Commands.Execute("volume-pc -1").StartsWith("ERR") && Program.PcVolume == pc, "invalid PC volume must not change volume");
+                    Check(Commands.Execute("volume-phone 101").StartsWith("ERR"), "invalid phone volume must be rejected");
+                    Check(Commands.Execute("notify typo").StartsWith("ERR") && !Toast.Enabled, "invalid switch token must not toggle state");
+                    Check(Commands.Execute("volume-phone 40").StartsWith("ERR"), "disconnected phone volume must fail without dialog");
+                    File.Move(Path.Combine(temp, "scrcpy.exe"), Path.Combine(temp, "scrcpy-disabled.exe"));
+                    try { Check(Commands.Execute("connect-usb").StartsWith("ERR"), "missing scrcpy must fail CLI connection without a modal dialog"); }
+                    finally { File.Move(Path.Combine(temp, "scrcpy-disabled.exe"), Path.Combine(temp, "scrcpy.exe")); }
+                    Program.PcVolume = .8f;
+                    using (var volume = new VolumeDialog(.8f, 40, false)) {
+                        ((TrackBar)typeof(VolumeDialog).GetField("pcBar", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(volume)).Value = 20;
+                        volume.DialogResult = DialogResult.Cancel;
+                        typeof(VolumeDialog).GetMethod("OnFormClosed", BindingFlags.Instance | BindingFlags.NonPublic).Invoke(volume, new object[] { new FormClosedEventArgs(CloseReason.UserClosing) });
+                    }
+                    Check(Math.Abs(Program.PcVolume - .8f) < .001, "cancel restores previewed PC volume");
+                    using (var volume = new VolumeDialog(.8f, 40, true)) {
+                        volume.DialogResult = DialogResult.OK;
+                        typeof(VolumeDialog).GetMethod("OnFormClosed", BindingFlags.Instance | BindingFlags.NonPublic).Invoke(volume, new object[] { new FormClosedEventArgs(CloseReason.UserClosing) });
+                        Check(volume.PhoneValue == -1, "unchanged phone slider must not overwrite external volume changes");
+                    }
+                    var state = Path.Combine(temp, "volume-state");
+                    Environment.SetEnvironmentVariable("PAT_RUNTIME_STATE", state);
+                    Environment.SetEnvironmentVariable("PAT_RUNTIME_VOLUME_MODE", "unreadable");
+                    Program.Sessions.Add(new Session { Serial = "synthetic" });
+                    Check(!Program.SetPhoneVolumePct(60) && !File.Exists(state + ".called"), "unreadable baseline must not send volume-up events");
+                    Environment.SetEnvironmentVariable("PAT_RUNTIME_VOLUME_MODE", "fixed");
+                    Check(!Program.SetPhoneVolumePct(60), "phone refusing target must not report success");
+                    Environment.SetEnvironmentVariable("PAT_RUNTIME_VOLUME_MODE", "success");
+                    Check(Program.SetPhoneVolumePct(60) && Program.PhoneVolumePct == 60, "phone volume succeeds only after verified target");
+                    Program.Sessions.Clear();
+                    Program.Sessions.Add(new Session { Serial = "current" });
+                    Program.Sessions.Add(new Session { Serial = "other", IsMic = true });
+                    Check(Program.PrimarySerial == "current", "mic side-channel must not redirect primary device operations");
+                    Program.Sessions.Clear();
+                    Program.Sessions.Add(new Session { Serial = "current" });
+                    Program.Sessions.Add(new Session { Serial = "current", IsMic = true });
+                    Program.StopLatest();
+                    Check(Program.Sessions.Count == 0, "stop current must stop its main session and companion mic");
+                    Program.Sessions.Add(new Session { Serial = "synthetic", IsMic = true });
+                    Program.ShowVideo = true;
+                    typeof(Program).GetMethod("HandleSessionExit", BindingFlags.Static | BindingFlags.NonPublic).Invoke(null, new object[] { "synthetic", "test", true, false });
+                    Check(!Program.ShowVideo, "companion mic must not prevent video-to-audio fallback");
+                    Program.StopAllSessions(false);
+                    Program.AllowMultiple = true;
+                    Environment.SetEnvironmentVariable("PAT_RUNTIME_SCRCPY_DELAY", "1");
+                    Program.StartSession("first", "test", false);
+                    Program.StartSession("second", "test", false);
+                    Program.SetClipboardSync(!Program.ClipboardSync);
+                    lock (Program.Sessions) Check(Program.Sessions.Count(x => !x.IsMic) == 2, "mode restart preserves all multiple-device sessions");
+                    Program.StopAllSessions(false);
+                    Environment.SetEnvironmentVariable("PAT_RUNTIME_SCRCPY_DELAY", null);
+                    Environment.SetEnvironmentVariable("PAT_RUNTIME_STATE", null);
+                    Environment.SetEnvironmentVariable("PAT_RUNTIME_VOLUME_MODE", null);
+                    Program.PcVolume = pc;
+                    Toast.Enabled = notifications;
                     Console.WriteLine("PASS immediate session exits and settings/alias roundtrip");
                 }
                 finally {

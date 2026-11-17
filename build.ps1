@@ -1,4 +1,4 @@
-param([switch]$Portable, [string]$Runtime = "$env:LOCALAPPDATA\PhoneAudioTray\4.1")
+﻿param([switch]$Portable, [string]$Runtime = "$env:LOCALAPPDATA\PhoneAudioTray\4.1")
 $ErrorActionPreference = 'Stop'
 Push-Location $PSScriptRoot
 try {
@@ -8,7 +8,7 @@ try {
     if ($Portable) {
         foreach ($name in @('scrcpy.exe','scrcpy-server','scrcpy.ico','avcodec-62.dll','avformat-62.dll','avutil-60.dll','swresample-6.dll','SDL3.dll','libusb-1.0.dll','adb.exe','AdbWinApi.dll','AdbWinUsbApi.dll')) {
             $resource = Join-Path $Runtime $name
-            if (!(Test-Path -LiteralPath $resource)) { throw "Missing runtime file: $resource" }
+            if (!(Test-Path -LiteralPath $resource -PathType Leaf) -or (Get-Item -LiteralPath $resource).Length -eq 0) { throw "Missing or empty runtime file: $resource" }
             $compileArgs += "/resource:$resource,$name"
         }
         $compileArgs += '/resource:app.ico,app.ico', '/resource:使用手册.md,manual.md'

@@ -1,9 +1,9 @@
-param([switch]$Desktop)
+﻿param([switch]$Desktop)
 $ErrorActionPreference = 'Stop'
 $project = Split-Path $PSScriptRoot -Parent
 $compiler = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
 $sources = @(Get-ChildItem (Join-Path $project 'src') -Filter '*.cs' | ForEach-Object FullName)
-$cases = @('FileOperationsRegression', 'MediaPreviewRegression', 'TaskManagerRegression', 'FileBrowserPerformance', 'RuntimeRegression')
+$cases = @('FileOperationsRegression', 'MediaPreviewRegression', 'AppIconsRegression', 'TaskManagerRegression', 'FileBrowserPerformance', 'RuntimeRegression')
 if ($Desktop) { $cases += 'DesktopRegression' }
 foreach ($case in $cases) {
     $output = Join-Path $PSScriptRoot "$case.exe"
