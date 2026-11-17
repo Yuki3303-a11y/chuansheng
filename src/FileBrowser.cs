@@ -137,8 +137,8 @@ namespace PhoneAudioTray
                 View = View.Details, FullRowSelect = true, GridLines = true,
                 MultiSelect = true, SmallImageList = icons, HideSelection = false, VirtualMode = true
             };
-            list.Columns.Add("名称", 360);
-            list.Columns.Add("类型", 80);
+            list.Columns.Add("名称", 300);
+            list.Columns.Add("类型", 140);
             list.Columns.Add("修改时间", 130);
             list.Columns.Add("大小", 120);
             list.ColumnClick += List_ColumnClick;
@@ -336,7 +336,7 @@ namespace PhoneAudioTray
             switch (column)
             {
                 case 0: r = string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase); break;
-                case 1: r = string.Compare(a.IsDir ? "文件夹" : "文件", b.IsDir ? "文件夹" : "文件", StringComparison.Ordinal); break;
+                case 1: r = string.Compare(a.TypeText, b.TypeText, StringComparison.Ordinal); break;
                 case 2: r = string.Compare(a.Modified ?? "", b.Modified ?? "", StringComparison.Ordinal); break;
                 case 3: r = a.Size.CompareTo(b.Size); break;
             }
@@ -487,7 +487,7 @@ namespace PhoneAudioTray
             var entry = EntryAt(e.ItemIndex);
             e.Item = entry == null
                 ? new ListViewItem(new[] { "..", "文件夹", "", "" }) { ImageIndex = 0 }
-                : new ListViewItem(new[] { entry.Name, entry.IsDir ? "文件夹" : "文件", entry.Modified ?? "", entry.SizeText })
+                : new ListViewItem(new[] { entry.Name, entry.TypeText, entry.Modified ?? "", entry.SizeText })
                     { ImageIndex = entry.IsDir ? 0 : 1 };
         }
 

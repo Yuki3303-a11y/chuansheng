@@ -92,11 +92,11 @@ namespace PhoneAudioTray
         private static void TestDevice(string serial)
         {
             var id = "Transmit-FileSafety-" + Guid.NewGuid().ToString("N");
-            var local = Path.Combine(Path.GetTempPath(), id);
+            var local = Path.Combine(Path.GetTempPath(), id, "中文下载");
             var remote = "/sdcard/Download/" + id;
             Directory.CreateDirectory(local);
             string message;
-            foreach (var name in new[] { "error special '$ & (1).txt", ".source" })
+            foreach (var name in new[] { "中文合成资料 (Example).pdf", "日本語の画像 123456.png", "error special '$ & (1).txt", ".source" })
             {
                 var file = Path.Combine(local, name);
                 File.WriteAllText(file, "Synthetic original content: " + id);
@@ -125,9 +125,16 @@ namespace PhoneAudioTray
                 trash = Transfer.ListTrash(serial).Find(item => item.Source == entry.FullPath);
                 Check(trash != null && Transfer.PurgeTrash(serial, trash, out message), "Synthetic purge failed");
             }
+            var nestedName = "子目录";
+            var nestedFile = Path.Combine(local, "日本語の画像.png");
+            File.WriteAllText(nestedFile, "Synthetic nested Unicode file");
+            Transfer.PushFile(serial, nestedFile, remote + "/" + nestedName);
+            var nestedTarget = Path.Combine(local, "文件夹取回");
+            Transfer.PullEntry(serial, new RemoteEntry { Name = nestedName, FullPath = remote + "/" + nestedName, IsDir = true }, nestedTarget, CancellationToken.None);
+            Check(File.ReadAllText(Path.Combine(nestedTarget, nestedName, Path.GetFileName(nestedFile))) == "Synthetic nested Unicode file", "Nested Unicode pull changed name/content");
             // Only this harness's randomly named synthetic directory is removed.
             Check(Transfer.DeletePermanent(serial, new RemoteEntry { Name = id, FullPath = remote, IsDir = true }, out message), "Synthetic directory cleanup failed");
-            Console.WriteLine("PASS device: special characters, error filename, .source collision, exact trash provenance, restore conflict, content roundtrip and purge");
+            Console.WriteLine("PASS device: Chinese/Japanese files and nested folders, special characters, .source collision, exact trash provenance, restore conflict, content roundtrip and purge");
         }
     }
 }

@@ -47,7 +47,7 @@
 
 ## 下载与使用
 
-1. 到 [Releases](https://github.com/Yuki3303-a11y/chuansheng/releases) 下载 `Transmit-v1.1.3.exe`（便携版单文件，约 25 MB，内含 scrcpy 与 adb）
+1. 到 [Releases](https://github.com/Yuki3303-a11y/chuansheng/releases) 下载 `Transmit-v1.1.4.exe`（便携版单文件，约 25 MB，内含 scrcpy 与 adb）
 2. 双击运行（文件名可随意改）→ **首次会解压约 25 MB** 到 `%LOCALAPPDATA%\PhoneAudioTray\`（5~15 秒）
 3. 托盘出现图标，左键或右键 →「连接手机」打开连接窗口 → 选设备 → 连接
 4. 右键托盘菜单可开画面、调音量、传文件、看进程

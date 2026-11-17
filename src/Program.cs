@@ -27,7 +27,7 @@ namespace PhoneAudioTray
 
     internal static class Program
     {
-        public const string AppVersion = "1.1.3";
+        public const string AppVersion = "1.1.4";
 
         public static string BaseDir = AppDomain.CurrentDomain.BaseDirectory;
         /// <summary>外部 scrcpy 目录（settings.txt 里的 scrcpyDir，或同级的 Scrcpy 文件夹）</summary>
@@ -297,8 +297,6 @@ namespace PhoneAudioTray
                 using (var f = new ProcessTreeDialog(serial)) f.ShowDialog();
             });
 
-            menu.Items.Add("停止当前", null, (s, e) => StopLatest());
-            menu.Items.Add("停止全部", null, (s, e) => { StopAllSessions(); UpdateStatus(); });
             menu.Items.Add(new ToolStripSeparator());
             var startupItem = new ToolStripMenuItem("Windows 登录时自启动");
             menu.Opening += (s, e) =>
@@ -317,19 +315,6 @@ namespace PhoneAudioTray
                 using (var f = new DebugForm(string.IsNullOrEmpty(LastSerial) ? PrimarySerial : LastSerial))
                     f.ShowDialog();
             });
-            menu.Items.Add("使用说明…", null, (s, e) =>
-            {
-                using (var w = new WelcomeForm(false))
-                {
-                    w.ShowDialog();
-                    if (w.StartConnect) ShowConnectDialog(false);
-                }
-            });
-            var manualMenu = new ToolStripMenuItem("打开使用手册");
-            manualMenu.DropDownItems.Add("用默认程序打开（Typora 等）", null, (s, e) => OpenManual(false));
-            manualMenu.DropDownItems.Add("用记事本打开", null, (s, e) => OpenManual(true));
-            manualMenu.DropDownItems.Add("在文件夹中显示", null, (s, e) => RevealManual());
-            menu.Items.Add(manualMenu);
             menu.Items.Add("打开程序目录", null, (s, e) => Process.Start("explorer.exe", BaseDir));
             menu.Items.Add("退出", null, (s, e) => { Tray.Visible = false; Application.Exit(); });
 

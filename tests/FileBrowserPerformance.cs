@@ -36,6 +36,13 @@ namespace PhoneAudioTray
 
         private static async Task RunTests(string[] args)
         {
+            Check(new RemoteEntry { Name = "PHOTO.JPG" }.TypeText == "图片（JPG）", "Image extensions must be case-insensitive");
+            Check(new RemoteEntry { Name = "archive.tar.gz" }.TypeText == "压缩包（GZ）", "Compound archive extension");
+            Check(new RemoteEntry { Name = "song.flac" }.TypeText == "音频（FLAC）", "Common audio format");
+            Check(new RemoteEntry { Name = "book.pdf" }.TypeText == "PDF 文档（PDF）", "PDF type");
+            Check(new RemoteEntry { Name = "unknown.custom" }.TypeText == "文件（CUSTOM）", "Unknown extension must stay visible");
+            Check(new RemoteEntry { Name = "plain" }.TypeText == "文件", "Extensionless fallback");
+            Check(new RemoteEntry { Name = "folder.jpg", IsDir = true }.TypeText == "文件夹", "Directory takes precedence over extension");
                 typeof(Program).GetField("_adb", BindingFlags.Static | BindingFlags.NonPublic)
                     .SetValue(null, Assembly.GetExecutingAssembly().Location);
                 string warning;
@@ -78,6 +85,7 @@ namespace PhoneAudioTray
                         typeof(FileBrowserDialog).GetField("suppressTreeEvent", BindingFlags.Instance | BindingFlags.NonPublic).SetValue(dialog, false);
                         Check(((Label)Field(dialog, "lblPath")).Text.StartsWith("/fast"), "Old directory result overwrote new path");
                         Check(list.Items[1].Text == "sample-00000.mp4", "Virtual retrieval or sorting is incorrect");
+                        Check(list.Items[1].SubItems[1].Text == "视频（MP4）", "Virtual rows must show the detected file type");
                         Check(list.Items[20000].Text == "sample-19999.mp4", "Last virtual row is incorrect");
                         clock.Restart();
                         list.SelectedIndices.Add(1);

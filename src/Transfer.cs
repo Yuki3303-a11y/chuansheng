@@ -20,6 +20,41 @@ namespace PhoneAudioTray
         public string Modified;
         public string FullPath;
 
+        public string TypeText
+        {
+            get
+            {
+                if (IsDir) return "文件夹";
+                var name = Name ?? "";
+                var dot = name.LastIndexOf('.');
+                if (dot <= 0 || dot == name.Length - 1) return "文件";
+                var ext = name.Substring(dot + 1).ToLowerInvariant();
+                string type;
+                switch (ext)
+                {
+                    case "jpg": case "jpeg": case "png": case "gif": case "bmp": case "webp":
+                    case "heic": case "heif": case "tif": case "tiff": case "svg": case "ico": case "avif": type = "图片"; break;
+                    case "mp4": case "mkv": case "avi": case "mov": case "m4v": case "wmv":
+                    case "flv": case "webm": case "3gp": case "mpeg": case "mpg": case "ts": case "m2ts": type = "视频"; break;
+                    case "mp3": case "flac": case "wav": case "aac": case "m4a": case "ogg":
+                    case "opus": case "wma": case "amr": case "ape": case "aiff": type = "音频"; break;
+                    case "zip": case "rar": case "7z": case "tar": case "gz": case "bz2": case "xz": case "tgz": case "zst": type = "压缩包"; break;
+                    case "pdf": type = "PDF 文档"; break;
+                    case "doc": case "docx": case "odt": case "rtf": type = "文字文档"; break;
+                    case "xls": case "xlsx": case "csv": case "ods": type = "表格"; break;
+                    case "ppt": case "pptx": case "odp": type = "演示文稿"; break;
+                    case "txt": case "md": case "log": type = "文本"; break;
+                    case "epub": case "mobi": case "azw": case "azw3": type = "电子书"; break;
+                    case "apk": case "apks": case "xapk": case "aab": type = "安卓安装包"; break;
+                    case "exe": case "msi": type = "Windows 程序"; break;
+                    case "srt": case "ass": case "ssa": case "vtt": case "sub": type = "字幕"; break;
+                    case "html": case "htm": type = "网页"; break;
+                    default: type = "文件"; break;
+                }
+                return type + "（" + ext.ToUpperInvariant() + "）";
+            }
+        }
+
         public string SizeText
         {
             get
@@ -120,6 +155,7 @@ namespace PhoneAudioTray
 
         public static void PullEntry(string serial, RemoteEntry entry, string target, CancellationToken cancellation)
         {
+            cancellation.ThrowIfCancellationRequested();
             ValidateRemotePath(entry.FullPath);
             var name = entry.FullPath.Substring(entry.FullPath.LastIndexOf('/') + 1);
             if (name.Length == 0 || name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || name.EndsWith(" ") || name.EndsWith("."))
@@ -133,7 +169,18 @@ namespace PhoneAudioTray
             if (!local.StartsWith(directory, StringComparison.OrdinalIgnoreCase)) throw new IOException("无效的本地目标路径。");
             if (File.Exists(local) || Directory.Exists(local)) throw new IOException("电脑目标已有同名项目，未覆盖：" + local);
             Directory.CreateDirectory(directory);
-            RunFileCommand("-s " + Arg(serial) + " pull " + Arg(entry.FullPath) + " " + Arg(directory), Timeout.Infinite, cancellation);
+            if (entry.IsDir)
+            {
+                // Create Unicode directories with .NET too: ADB's recursive local
+                // directory creation has the same filename conversion problem.
+                Directory.CreateDirectory(local);
+                foreach (var child in ListRemote(serial, entry.FullPath, cancellation, true))
+                    PullEntry(serial, child, local, cancellation);
+                return;
+            }
+            // Give ADB the complete Windows destination; deriving a Unicode basename
+            // from a remote path can corrupt it in the bundled Windows ADB.
+            RunFileCommand("-s " + Arg(serial) + " pull " + Arg(entry.FullPath) + " " + Arg(local), Timeout.Infinite, cancellation);
         }
 
         private static string RunShell(string serial, string command, CancellationToken cancellation, int timeout = 60000)

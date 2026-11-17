@@ -43,6 +43,9 @@ namespace PhoneAudioTray
             typeof(Program).GetMethod("BuildTray", BindingFlags.Static | BindingFlags.NonPublic).Invoke(null, null);
             try
             {
+                foreach (ToolStripItem item in Program.Tray.ContextMenuStrip.Items)
+                    if (item.Text == "停止当前" || item.Text == "停止全部" || item.Text == "使用说明…" || item.Text == "打开使用手册")
+                        throw new Exception("Removed entry still appears in tray menu: " + item.Text);
                 typeof(NotifyIcon).GetMethod("OnMouseUp", BindingFlags.Instance | BindingFlags.NonPublic)
                     .Invoke(Program.Tray, new object[] { new MouseEventArgs(MouseButtons.Left, 1, 0, 0, 0) });
                 Application.DoEvents();
