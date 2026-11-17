@@ -10,6 +10,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace PhoneAudioTray
@@ -26,7 +27,7 @@ namespace PhoneAudioTray
 
     internal static class Program
     {
-        public const string AppVersion = "1.1.0";
+        public const string AppVersion = "1.1.3";
 
         public static string BaseDir = AppDomain.CurrentDomain.BaseDirectory;
         /// <summary>外部 scrcpy 目录（settings.txt 里的 scrcpyDir，或同级的 Scrcpy 文件夹）</summary>
@@ -171,6 +172,7 @@ namespace PhoneAudioTray
 
                 Application.Run(ctx);
                 ShutdownAll();
+                MediaPreview.Cleanup();
             }
         }
 
@@ -284,12 +286,12 @@ namespace PhoneAudioTray
 
             menu.Items.Add("推送文件到手机…", null, (s, e) => Transfer.PushFiles());
             menu.Items.Add("从手机取文件…", null, (s, e) => Transfer.PullFiles());
-            menu.Items.Add("手机进程树…", null, (s, e) =>
+            menu.Items.Add("手机任务管理器…", null, (s, e) =>
             {
                 var serial = PrimarySerial;
                 if (string.IsNullOrEmpty(serial))
                 {
-                    MessageBox.Show("还没有连接手机。", "进程树", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    MessageBox.Show("还没有连接手机。", "手机任务管理器", MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return;
                 }
                 using (var f = new ProcessTreeDialog(serial)) f.ShowDialog();
@@ -298,6 +300,18 @@ namespace PhoneAudioTray
             menu.Items.Add("停止当前", null, (s, e) => StopLatest());
             menu.Items.Add("停止全部", null, (s, e) => { StopAllSessions(); UpdateStatus(); });
             menu.Items.Add(new ToolStripSeparator());
+            var startupItem = new ToolStripMenuItem("Windows 登录时自启动");
+            menu.Opening += (s, e) =>
+            {
+                try { startupItem.Checked = Shortcut.StartupEnabled; startupItem.Enabled = true; }
+                catch { startupItem.Enabled = false; }
+            };
+            startupItem.Click += (s, e) =>
+            {
+                try { Shortcut.SetStartup(!Shortcut.StartupEnabled); startupItem.Checked = Shortcut.StartupEnabled; }
+                catch (Exception ex) { MessageBox.Show("无法修改自启动设置：" + ex.Message, "自启动", MessageBoxButtons.OK, MessageBoxIcon.Warning); }
+            };
+            menu.Items.Add(startupItem);
             menu.Items.Add("调试窗口…", null, (s, e) =>
             {
                 using (var f = new DebugForm(string.IsNullOrEmpty(LastSerial) ? PrimarySerial : LastSerial))
@@ -320,7 +334,13 @@ namespace PhoneAudioTray
             menu.Items.Add("退出", null, (s, e) => { Tray.Visible = false; Application.Exit(); });
 
             Tray.ContextMenuStrip = menu;
-            Tray.DoubleClick += (s, e) => ShowConnectDialog(false);
+            Tray.MouseUp += (s, e) =>
+            {
+                if (e.Button != MouseButtons.Left) return;
+                // 复用 NotifyIcon 原生菜单弹出逻辑，包含前台激活与点击外部关闭。
+                typeof(NotifyIcon).GetMethod("ShowContextMenu", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+                    .Invoke(Tray, null);
+            };
 
             // 命令行指令队列：由 UI 线程定时取出执行（比 Control.Invoke 稳，不依赖句柄）
             var cmdTimer = new System.Windows.Forms.Timer { Interval = 120 };
@@ -335,6 +355,7 @@ namespace PhoneAudioTray
                 CommandRequest req;
                 while (PendingCommands.TryDequeue(out req))
                 {
+                    if (!req.TryStart()) continue;
                     try { req.Result = Commands.Execute(req.Line); }
                     catch (Exception ex) { req.Result = "ERR " + ex.Message; }
                     finally { req.Done.Set(); }
@@ -346,29 +367,7 @@ namespace PhoneAudioTray
         // ---------- adb ----------
         public static string RunAdb(string args, int timeoutMs = 8000)
         {
-            try
-            {
-                var psi = new ProcessStartInfo(AdbExe, args)
-                {
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    StandardOutputEncoding = Encoding.UTF8,
-                    StandardErrorEncoding = Encoding.UTF8
-                };
-                using (var p = Process.Start(psi))
-                {
-                    var stdout = p.StandardOutput.ReadToEnd();
-                    var stderr = p.StandardError.ReadToEnd();
-                    if (!p.WaitForExit(timeoutMs))
-                    {
-                        try { p.Kill(); } catch { }
-                        return "";
-                    }
-                    return stdout + stderr;
-                }
-            }
+            try { return Transfer.RunFileCommand(args, timeoutMs); }
             catch (Exception ex)
             {
                 return "ERROR: " + ex.Message;
@@ -388,12 +387,23 @@ namespace PhoneAudioTray
                     RedirectStandardError = true
                 };
                 using (var p = Process.Start(psi))
+                using (var ms = new MemoryStream())
                 {
-                    var ms = new MemoryStream();
-                    p.StandardOutput.BaseStream.CopyTo(ms);
-                    p.StandardError.ReadToEnd();
-                    if (!p.WaitForExit(timeoutMs)) { try { p.Kill(); } catch { } }
-                    return ms.ToArray();
+                    var output = p.StandardOutput.BaseStream.CopyToAsync(ms);
+                    var error = p.StandardError.ReadToEndAsync();
+                    var clock = Stopwatch.StartNew();
+                    try
+                    {
+                        while (!p.WaitForExit(50) || !output.IsCompleted || !error.IsCompleted)
+                        {
+                            if (timeoutMs != Timeout.Infinite && clock.ElapsedMilliseconds >= timeoutMs)
+                                throw new TimeoutException("ADB 二进制读取超时");
+                            Thread.Sleep(10);
+                        }
+                        Task.WaitAll(output, error);
+                        return p.ExitCode == 0 ? ms.ToArray() : null;
+                    }
+                    finally { try { if (!p.HasExited) { p.Kill(); p.WaitForExit(5000); } } catch { } }
                 }
             }
             catch { return null; }
@@ -447,7 +457,7 @@ namespace PhoneAudioTray
                 if (!File.Exists(CachePath)) return;
                 foreach (var line in File.ReadAllLines(CachePath))
                 {
-                    var parts = line.Split('|');
+                    var parts = line.Split(new[] { '|' }, 2);
                     if (parts.Length == 2 && parts[0].Trim().Length > 0)
                         NameCache[parts[0].Trim()] = parts[1].Trim();
                 }
@@ -735,7 +745,7 @@ namespace PhoneAudioTray
                 if (!File.Exists(SettingsPath)) return;
                 foreach (var line in File.ReadAllLines(SettingsPath))
                 {
-                    var p = line.Split('|');
+                    var p = line.Split(new[] { '|' }, 2);
                     if (p.Length != 2) continue;
                     if (p[0].Trim() == "pushTarget" && p[1].Trim().Length > 0) PushTarget = p[1].Trim();
                     if (p[0].Trim() == "scrcpyDir" && p[1].Trim().Length > 0) ScrcpyDir = p[1].Trim();
@@ -835,7 +845,7 @@ namespace PhoneAudioTray
             var serial = PrimarySerial;
             if (string.IsNullOrEmpty(serial))
             {
-                MessageBox.Show("还没有连接手机。", "进程树", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show("还没有连接手机。", "手机任务管理器", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
             using (var f = new ProcessTreeDialog(serial)) f.ShowDialog();
@@ -849,11 +859,8 @@ namespace PhoneAudioTray
 
             EnsureSettings();
             var target = string.IsNullOrEmpty(PushTarget) ? Transfer.RemoteDir : PushTarget;
-            RunAdb("-s " + serial + " shell mkdir -p " + "'" + target + "'", 15000);
-
-            var output = RunAdb("-s " + serial + " push \"" + localPath + "\" \"" + target + "/\"", 600000);
-            if (output.IndexOf("error", StringComparison.OrdinalIgnoreCase) >= 0)
-                return "ERR 推送失败：" + output.Trim();
+            try { Transfer.PushFile(serial, localPath, target); }
+            catch (Exception ex) { return "ERR 推送失败：" + ex.Message; }
 
             Toast.Show("推送完成", Path.GetFileName(localPath) + " → " + target);
             return "OK 已推送 " + Path.GetFileName(localPath) + " → " + target;
@@ -889,7 +896,7 @@ namespace PhoneAudioTray
                 "  --push <本地文件路径>       推到手机当前目标目录",
                 "  --pull                      打开「从手机取文件」",
                 "  --files                     打开文件浏览",
-                "  --ps                        打开进程树",
+                "  --ps                        打开手机任务管理器",
                 "",
                 "其他",
                 "  --stop                      停止当前这一路",
@@ -1078,7 +1085,12 @@ namespace PhoneAudioTray
                 return;
             }
 
-            var already = Sessions.FirstOrDefault(s => s.Serial == serial && !s.IsMic);
+            Session already;
+            bool hadSessions;
+            lock (Sessions) {
+                already = Sessions.FirstOrDefault(s => s.Serial == serial && !s.IsMic);
+                hadSessions = Sessions.Count > 0;
+            }
             if (already != null)
             {
                 MessageBox.Show("这个设备已经在转发了：" + serial, "提示",
@@ -1086,8 +1098,10 @@ namespace PhoneAudioTray
                 return;
             }
 
-            if (!AllowMultiple && Sessions.Count > 0) StopAllSessions(false);
+            if (!AllowMultiple && hadSessions) StopAllSessions(false);
 
+            Process p = null;
+            Session session = null;
             try
             {
                 string scrcpyArgs;
@@ -1116,7 +1130,7 @@ namespace PhoneAudioTray
                     RedirectStandardError = true,
                     WorkingDirectory = BaseDir
                 };
-                var p = Process.Start(psi);
+                p = Process.Start(psi);
                 p.OutputDataReceived += (s2, ev) => { if (ev.Data != null) AppendLog(ev.Data); };
                 p.ErrorDataReceived += (s2, ev) => { if (ev.Data != null) AppendLog(ev.Data); };
                 p.BeginOutputReadLine();
@@ -1124,8 +1138,8 @@ namespace PhoneAudioTray
                 JobObject.Add(p);
                 LastSerial = serial;
                 LastMode = mode;
-                var session = new Session { Proc = p, Serial = serial, Mode = mode, IsVideo = ShowVideo };
-                p.EnableRaisingEvents = true;
+                session = new Session { Proc = p, Serial = serial, Mode = mode, IsVideo = ShowVideo };
+                lock (Sessions) Sessions.Add(session);
                 p.Exited += (s, e) =>
                 {
                     Session gone;
@@ -1143,8 +1157,9 @@ namespace PhoneAudioTray
                         UpdateStatus();
                         HandleSessionExit(serial, mode, wasVideo, byUs);
                     });
+                    p.Dispose();
                 };
-                lock (Sessions) Sessions.Add(session);
+                p.EnableRaisingEvents = true;
 
                 // 画面模式：等窗口出现后，按当前置顶设置应用一次
                 if (ShowVideo)
@@ -1154,13 +1169,17 @@ namespace PhoneAudioTray
                     {
                         for (int i = 0; i < 40; i++)
                         {
-                            try { if (proc.HasExited) return; } catch { return; }
-                            var hwnd = NativeWin.FindWindowByPid(proc.Id);
-                            if (hwnd != IntPtr.Zero)
+                            try
                             {
-                                if (WindowTopMost) NativeWin.SetTopMost(hwnd, true);
-                                return;
+                                if (proc.HasExited) return;
+                                var hwnd = NativeWin.FindWindowByPid(proc.Id);
+                                if (hwnd != IntPtr.Zero)
+                                {
+                                    if (WindowTopMost) NativeWin.SetTopMost(hwnd, true);
+                                    return;
+                                }
                             }
+                            catch { return; }
                             Thread.Sleep(200);
                         }
                     });
@@ -1178,6 +1197,11 @@ namespace PhoneAudioTray
             }
             catch (Exception ex)
             {
+                if (session != null) Kill(session);
+                else if (p != null) {
+                    try { if (!p.HasExited) { p.Kill(); p.WaitForExit(5000); } } catch { }
+                    p.Dispose();
+                }
                 MessageBox.Show("启动 scrcpy 失败：\r\n" + ex.Message, "错误",
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
@@ -1294,6 +1318,8 @@ namespace PhoneAudioTray
         {
             lock (Sessions) if (Sessions.Any(s => s.Serial == serial && s.IsMic)) return;
 
+            Process p = null;
+            Session micSession = null;
             try
             {
                 var psi = new ProcessStartInfo(ScrcpyExe,
@@ -1305,25 +1331,32 @@ namespace PhoneAudioTray
                     RedirectStandardError = true,
                     WorkingDirectory = BaseDir
                 };
-                var p = Process.Start(psi);
+                p = Process.Start(psi);
                 p.OutputDataReceived += (s2, ev) => { if (ev.Data != null) AppendLog("[mic] " + ev.Data); };
                 p.ErrorDataReceived += (s2, ev) => { if (ev.Data != null) AppendLog("[mic] " + ev.Data); };
                 p.BeginOutputReadLine();
                 p.BeginErrorReadLine();
                 JobObject.Add(p);
 
-                var micSession = new Session { Proc = p, Serial = serial, Mode = "麦克风", IsMic = true };
-                p.EnableRaisingEvents = true;
+                micSession = new Session { Proc = p, Serial = serial, Mode = "麦克风", IsMic = true };
+                lock (Sessions) Sessions.Add(micSession);
                 p.Exited += (s2, e) =>
                 {
                     lock (Sessions) Sessions.RemoveAll(x => x.Proc == p);
                     Post(UpdateStatus);
+                    p.Dispose();
                 };
-                lock (Sessions) Sessions.Add(micSession);
+                p.EnableRaisingEvents = true;
 
                 ApplyPcVolume(PcVolume);
             }
-            catch { }
+            catch {
+                if (micSession != null) Kill(micSession);
+                else if (p != null) {
+                    try { if (!p.HasExited) { p.Kill(); p.WaitForExit(5000); } } catch { }
+                    p.Dispose();
+                }
+            }
         }
 
         public static void StopMicSessions()
@@ -1355,8 +1388,9 @@ namespace PhoneAudioTray
         private static void Kill(Session s)
         {
             try { s.KilledByUs = true; } catch { }
-            try { if (s.Proc != null && !s.Proc.HasExited) s.Proc.Kill(); } catch { }
             lock (Sessions) Sessions.Remove(s);
+            try { if (s.Proc != null && !s.Proc.HasExited) { s.Proc.Kill(); s.Proc.WaitForExit(5000); } } catch { }
+            try { if (s.Proc != null) s.Proc.Dispose(); } catch { }
         }
 
         public static void ShutdownAll()

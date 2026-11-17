@@ -14,6 +14,8 @@ namespace PhoneAudioTray
         private static readonly string[] Required =
         {
             "scrcpy.exe", "scrcpy-server", "scrcpy.ico", "app.ico", "adb.exe", "SDL3.dll",
+            "AdbWinApi.dll", "AdbWinUsbApi.dll", "avcodec-62.dll", "avformat-62.dll",
+            "avutil-60.dll", "swresample-6.dll", "libusb-1.0.dll",
             "使用手册.md"
         };
 
@@ -21,7 +23,7 @@ namespace PhoneAudioTray
         public static string Ensure()
         {
             var localDir = AppDomain.CurrentDomain.BaseDirectory;
-            if (Required.All(f => File.Exists(Path.Combine(localDir, f))))
+            if (Required.All(f => IsComplete(Path.Combine(localDir, f))))
                 return localDir;
 
             var asm = Assembly.GetExecutingAssembly();
@@ -33,7 +35,7 @@ namespace PhoneAudioTray
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                 "PhoneAudioTray", PayloadVersion);
 
-            if (Required.All(f => File.Exists(Path.Combine(root, f))))
+            if (Required.All(f => IsComplete(Path.Combine(root, f))))
                 return root;
 
             try
@@ -65,6 +67,11 @@ namespace PhoneAudioTray
                     "传声", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return localDir;
             }
+        }
+
+        private static bool IsComplete(string path)
+        {
+            return File.Exists(path) && new FileInfo(path).Length > 0;
         }
 
         private static bool LooksLikePayload(string name)

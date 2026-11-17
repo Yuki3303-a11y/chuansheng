@@ -14,7 +14,7 @@ namespace PhoneAudioTray
 {
     internal static class Ipc
     {
-        public const string PipeName = "PhoneAudioTray.IPC";
+        internal static string PipeName = "PhoneAudioTray.IPC";
 
         // ---------- 服务端（托盘程序里跑）----------
         public static void StartServer()
@@ -25,30 +25,12 @@ namespace PhoneAudioTray
                 {
                     try
                     {
-                        using (var server = new NamedPipeServerStream(PipeName, PipeDirection.InOut, 1,
-                            PipeTransmissionMode.Message, PipeOptions.None))
-                        {
-                            server.WaitForConnection();
-                            string line;
-                            using (var reader = new StreamReader(server, Encoding.UTF8, false, 1024, true))
-                                line = reader.ReadLine();
-
-                            string result;
-                            try
-                            {
-                                // 交给 UI 线程的定时器去执行（避免句柄未建时 Invoke 失败）
-                                var req = new CommandRequest { Line = line };
-                                Program.PendingCommands.Enqueue(req);
-                                result = req.Done.Wait(30000) ? (req.Result ?? "OK") : "ERR 执行超时（可能有弹窗挡住了）";
-                            }
-                            catch (Exception ex) { result = "ERR " + ex.Message; }
-
-                            using (var writer = new StreamWriter(server, new UTF8Encoding(false), 1024, true) { AutoFlush = true })
-                            {
-                                writer.WriteLine(result ?? "OK");
-                                writer.Flush();
-                            }
-                        }
+                        var server = new NamedPipeServerStream(PipeName, PipeDirection.InOut,
+                            NamedPipeServerStream.MaxAllowedServerInstances, PipeTransmissionMode.Message, PipeOptions.Asynchronous);
+                        try { server.WaitForConnection(); }
+                        catch { server.Dispose(); throw; }
+                        // 每个客户端独立等待；传输或弹窗不会挡住另一个客户端的 ping。
+                        ThreadPool.QueueUserWorkItem(s => HandleConnection((NamedPipeServerStream)s), server);
                     }
                     catch { Thread.Sleep(500); }
                 }
@@ -57,19 +39,65 @@ namespace PhoneAudioTray
             thread.Start();
         }
 
+        private static void HandleConnection(NamedPipeServerStream server)
+        {
+            using (server)
+            {
+                try
+                {
+                    string line;
+                    using (var reader = new StreamReader(server, Encoding.UTF8, false, 1024, true))
+                    {
+                        var read = reader.ReadLineAsync();
+                        if (!read.Wait(15000)) return;
+                        line = read.Result;
+                    }
+                    string result;
+                    if (line == "ping") result = "OK";
+                    else
+                    {
+                        var req = new CommandRequest { Line = line };
+                        Program.PendingCommands.Enqueue(req);
+                        result = WaitForCommand(req, 30000);
+                    }
+                    using (var writer = new StreamWriter(server, new UTF8Encoding(false), 1024, true) { AutoFlush = true })
+                        writer.WriteLine(result);
+                }
+                catch { /* 客户端退出不影响其他请求或托盘程序。 */ }
+            }
+        }
+
+        private static string WaitForCommand(CommandRequest request, int queueTimeoutMs)
+        {
+            if (!request.Done.Wait(queueTimeoutMs))
+            {
+                if (request.CancelQueued()) return "ERR 排队超时，命令未执行，请在当前操作完成后重试";
+                // 已开始的传输必须返回真实结果，不能在传输中途报告失败。
+                request.Done.Wait();
+            }
+            return request.Result ?? "OK";
+        }
+
         // ---------- 客户端 ----------
-        public static string Send(string command, int timeoutMs = 15000)
+        public static string Send(string command, int timeoutMs = Timeout.Infinite)
         {
             try
             {
-                using (var client = new NamedPipeClientStream(".", PipeName, PipeDirection.InOut))
+                var watch = Stopwatch.StartNew();
+                using (var client = new NamedPipeClientStream(".", PipeName, PipeDirection.InOut, PipeOptions.Asynchronous))
                 {
-                    client.Connect(timeoutMs);
+                    client.Connect(timeoutMs == Timeout.Infinite ? 15000 : timeoutMs);
                     using (var writer = new StreamWriter(client, new UTF8Encoding(false), 1024, true) { AutoFlush = true })
                         writer.WriteLine(command);
                     // 服务端可能返回多行（比如 --help），必须读到 EOF 再返回
                     using (var reader = new StreamReader(client, Encoding.UTF8, false, 1024, true))
-                        return (reader.ReadToEnd() ?? "").TrimEnd('\r', '\n');
+                    {
+                        var read = reader.ReadToEndAsync();
+                        var remaining = timeoutMs == Timeout.Infinite ? Timeout.Infinite : Math.Max(0, timeoutMs - (int)Math.Min(int.MaxValue, watch.ElapsedMilliseconds));
+                        if (!read.Wait(remaining)) return "ERR 响应超时，执行结果未确认，请勿重复提交操作";
+                        var response = (read.Result ?? "").TrimEnd('\r', '\n');
+                        return response.Length == 0 ? "ERR 程序连接已断开，执行结果未确认" : response;
+                    }
                 }
             }
             catch (Exception ex)
@@ -92,6 +120,9 @@ namespace PhoneAudioTray
         public string Result;
         public readonly System.Threading.ManualResetEventSlim Done =
             new System.Threading.ManualResetEventSlim(false);
+        private int state;
+        public bool TryStart() { return Interlocked.CompareExchange(ref state, 1, 0) == 0; }
+        public bool CancelQueued() { return Interlocked.CompareExchange(ref state, 2, 0) == 0; }
     }
 
     internal static class Cli
@@ -287,7 +318,8 @@ namespace PhoneAudioTray
                     {
                         var path = Arg(a, 1);
                         if (path == null) return "ERR-push";
-                        return "push " + path;
+                        try { return "push " + Path.GetFullPath(path); }
+                        catch { return "ERR-push"; }
                     }
 
                 case "pull":
@@ -394,8 +426,8 @@ namespace PhoneAudioTray
                             }
                             return "ERR 连接失败：" + detail.Trim();
                         }
-                        Program.ShowConnectDialog(true);
-                        return "OK 已打开连接窗口";
+                        Program.Post(() => Program.ShowConnectDialog(true));
+                        return "OK 已请求打开连接窗口";
 
                     case "devices":
                         {
@@ -490,16 +522,16 @@ namespace PhoneAudioTray
                         }
 
                     case "pull":
-                        Program.OpenFileBrowser();
-                        return "OK 已打开「从手机取文件」窗口";
+                        Program.Post(Program.OpenFileBrowser);
+                        return "OK 已请求打开「从手机取文件」窗口";
 
                     case "files":
-                        Program.OpenFileBrowser();
-                        return "OK 已打开文件浏览窗口";
+                        Program.Post(Program.OpenFileBrowser);
+                        return "OK 已请求打开文件浏览窗口";
 
                     case "ps":
-                        Program.OpenProcessTree();
-                        return "OK 已打开进程树窗口";
+                        Program.Post(Program.OpenProcessTree);
+                        return "OK 已请求打开手机任务管理器";
 
                     case "stop":
                         Program.StopLatest();
@@ -510,9 +542,8 @@ namespace PhoneAudioTray
                         return "OK 已停止全部";
 
                     case "exit":
-                        Program.ShutdownAll();
-                        Application.Exit();
-                        return "OK 已退出";
+                        Program.Post(() => { Program.ShutdownAll(); Application.Exit(); });
+                        return "OK 已请求退出";
 
                     case "help":
                         return Program.CommandHelp();
